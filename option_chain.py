@@ -80,54 +80,65 @@ class OptionChainService:
         } 
 
     @staticmethod
-    def classify_trade(trade_price: float, bid: float, ask: float, next_bid: float, next_ask: float, bid_size: int, ask_size: int, next_bid_size: int, next_ask_size: int) -> str:
-        """
-        Classify a trade as BUY or SELL based on price proximity to bid/ask and changes in quote sizes.
-        Args:
-            trade_price: float - The price at which the trade occurred
-            bid: float - The bid price before the trade
-            ask: float - The ask price before the trade
-            next_bid: float - The bid price after the trade
-            next_ask: float - The ask price after the trade
-            bid_size: int - The bid size before the trade
-            ask_size: int - The ask size before the trade
-            next_bid_size: int - The bid size after the trade
-            next_ask_size: int - The ask size after the trade
-        Returns:
-            str: 'BUY' if closer to ask, 'SELL' if closer to bid, 'UNKNOWN' if no quotes
-        """
-        if not bid or not ask:  # If we don't have quote data
-            return "UNKNOWN"
-        
-        # Step 1: Check if the trade price matches the ask or bid
+    def classify_trade(trade_price: float, bid: float, ask: float, next_bid: float, next_ask: float, 
+                      bid_size: int, ask_size: int, next_bid_size: int, next_ask_size: int) -> str:
+        """Enhanced hidden order detection"""
+        # Step 1: Exact quote matches with volume change
         if trade_price == ask and ask_size > next_ask_size:
             return "BUY"
         elif trade_price == bid and bid_size > next_bid_size:
             return "SELL"
-        
-        # Step 2: Check if the trade price is closer to the ask or bid
+
+        # Step 2: Quote movement detection
+        if next_ask < ask and next_bid == bid:  # Ask moves down after trade
+            return "BUY"
+        elif next_bid > bid and next_ask == ask:  # Bid moves up after trade
+            return "SELL"
+
+        # Step 3: Enhanced hidden order logic
+        spread = ask - bid
+        relative_price = (trade_price - bid) / spread if spread > 0 else 0.5
+
+        # Inside spread trades
+        if bid < trade_price < ask:
+            # Very close to quotes (within 10%)
+            if relative_price > 0.9:  # Near ask
+                return "BUY"
+            elif relative_price < 0.1:  # Near bid
+                return "SELL"
+            
+            # Volume pressure
+            if next_ask_size < ask_size and next_bid_size == bid_size:
+                return "BUY"  # Ask size decreased but bid didn't
+            elif next_bid_size < bid_size and next_ask_size == ask_size:
+                return "SELL"  # Bid size decreased but ask didn't
+            
+            # Price pressure
+            if next_ask < ask:  # Ask moves down after trade
+                return "BUY"
+            elif next_bid > bid:  # Bid moves up after trade
+                return "SELL"
+            
+            # Standard spread division (70/30)
+            if relative_price > 0.7:
+                return "BUY"
+            elif relative_price < 0.3:
+                return "SELL"
+
+        # Step 4: Outside quotes trades
+        if trade_price > ask:  # Above ask
+            return "BUY"
+        elif trade_price < bid:  # Below bid
+            return "SELL"
+
+        # Step 5: Tick test using midpoint comparison
         mid_price = (bid + ask) / 2
-        
-        # Step 3: Use the next quote to determine if the trade was a buy or sell
-        if next_ask < ask and next_bid == bid:
-            return "BUY"
-        elif next_bid > bid and next_ask == ask:
-            return "SELL"
-        
-        # Step 4: Hidden order logic
-        if trade_price > 0.7 * ask + 0.3 * bid:
-            return "BUY"
-        elif trade_price < 0.3 * ask + 0.7 * bid:
-            return "SELL"
-        
-        # Step 5: Tick-test using midpoint comparison
         next_mid_price = (next_bid + next_ask) / 2
         if next_mid_price > mid_price:
             return "BUY"
         elif next_mid_price < mid_price:
             return "SELL"
-        
-        # Default to unknown if all else fails
+
         return "UNKNOWN"
 
     @staticmethod
