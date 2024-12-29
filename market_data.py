@@ -5,85 +5,88 @@ import json
 class MarketDataService:
     """Handles all market data related operations"""
     
-    @staticmethod
-    def get_previous_trading_day():
-        today = date.today()
-        return today.strftime("%Y%m%d")
+    def __init__(self):
+        self.base_url = "http://127.0.0.1:25510"  # Theta Terminal local server
 
-    def get_current_spot_price(self, root, target_date=None):
-        """Get spot price for a symbol, defaulting to today"""
-        today = date.today().strftime("%Y%m%d")
-        return 590.0  # Default live price for now
-
-    def get_historical_spot_price(self, root, target_date):
-        """Get historical spot price - placeholder for now"""
-        print(f"Getting historical price for {root} on {target_date}")
-        return 590.0  # Default historical price for now
-
-    @staticmethod
-    def get_bulk_quote_data(symbol: str):
-        """Fetch bulk quote data for a symbol"""
-        today = date.today().strftime("%Y%m%d")
-        url = f"http://127.0.0.1:25510/v2/bulk_hist/option/quote"
-        
-        params = {
-            'root': symbol,
-            'exp': 0,  # Get all expiries
-            'start_date': today,
-            'end_date': today,
-            'ivl': 3600000  # 1-hour intervals
-        }
-        
-        print(f"\nFetching bulk quotes for {symbol} on {today}")
-        print(f"URL: {url}")
-        print(f"Params: {params}")
-        
+    def get_current_spot_price(self, root):
+        """Get current spot price for a symbol using Greeks snapshot"""
         try:
+            # Get today's date in YYYYMMDD format
+            today = date.today().strftime("%Y%m%d")
+            
+            # Build URL with required parameters
+            url = f"{self.base_url}/v2/bulk_snapshot/option/greeks"
+            params = {
+                'root': root,
+                'exp': today,  # Current expiry, will get under_price regardless
+                'use_csv': 'false'  # Use JSON format
+            }
+            
             response = requests.get(url, params=params)
-            if response.status_code != 200:
-                print(f"Error: Got status code {response.status_code}")
-                return {'response': []}
-                
-            data = response.json()
-            if 'response' in data:
-                contracts = data['response']
-                print(f"Received {len(contracts)} contracts for {symbol}")
-                
-                # Convert bulk quote data to contract format
-                formatted_contracts = []
-                for contract_data in contracts:
-                    # Get the latest quote (last tick in the array)
-                    ticks = contract_data.get('ticks', [])
-                    latest_tick = ticks[-1] if ticks else None
-                    contract_info = contract_data.get('contract', {})
-                    
-                    if latest_tick and contract_info:
-                        # Format based on header: ["ms_of_day","bid_size","bid_exchange","bid",
-                        # "bid_condition","ask_size","ask_exchange","ask","ask_condition","date"]
-                        formatted_contracts.append({
-                            'contract': {
-                                'root': contract_info.get('root'),
-                                'expiration': str(contract_info.get('expiration')),
-                                'strike': str(contract_info.get('strike')),
-                                'right': contract_info.get('right')
-                            },
-                            'quote': {
-                                'bid': latest_tick[3],  # bid price
-                                'ask': latest_tick[7],  # ask price
-                                'bid_size': latest_tick[1],  # bid size
-                                'ask_size': latest_tick[5],  # ask size
-                                'bid_exchange': latest_tick[2],  # bid exchange
-                                'ask_exchange': latest_tick[6],  # ask exchange
-                            }
-                        })
-                
-                print(f"Formatted {len(formatted_contracts)} valid contracts")
-                return {'response': formatted_contracts}
-            else:
-                print(f"No 'response' field in data")
-                return {'response': []}
-                
+            if response.status_code == 200:
+                data = response.json()
+                if 'response' in data and data['response']:
+                    # Get under_price from the response
+                    under_price = data['response'].get('under_price')
+                    if under_price:
+                        return float(under_price)
+            
+            print(f"Error getting spot price: status {response.status_code}")
+            print(f"Response: {response.text}")
+            return None
         except Exception as e:
-            print(f"Error fetching bulk quotes: {str(e)}")
-            return {'response': []}
+            print(f"Error getting spot price: {str(e)}")
+            return None
+
+    def list_option_contracts(self, root):
+        """Get list of available option contracts for a root"""
+        try:
+            # Get today's date in YYYYMMDD format
+            today = date.today().strftime("%Y%m%d")
+            
+            # Build URL with required parameters
+            url = f"{self.base_url}/v2/list/contracts/option/quote"
+            params = {
+                'root': root,
+                'start_date': today
+            }
+            
+            print(f"Getting contracts: {url} with params {params}")
+            response = requests.get(url, params=params)
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"Error listing contracts: status {response.status_code}")
+                print(f"Response: {response.text}")
+        except Exception as e:
+            print(f"Error listing contracts: {str(e)}")
+        return None
+
+    def get_quote(self, contract):
+        """Get latest quote for a specific contract"""
+        try:
+            # Format contract parameters
+            root = contract['root']
+            expiry = contract['expiration']
+            strike = float(contract['strike'])
+            right = contract['right']
+            
+            # Format strike properly (handle decimals)
+            if strike < 1000:
+                strike = int(strike * 1000)
+            else:
+                strike = int(strike)
+            
+            url = f"{self.base_url}/v2/hist/quote/option/{root}/{expiry}/{strike}/{right}/latest"
+            print(f"Getting quote: {url}")  # Debug
+            
+            response = requests.get(url)
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"Error getting quote: status {response.status_code}")
+        except Exception as e:
+            print(f"Error getting quote: {str(e)}")
+        return None
         

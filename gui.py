@@ -3,7 +3,7 @@ from datetime import datetime, date
 from PyQt5 import QtWidgets, QtCore, QtChart
 from PyQt5.QtWidgets import QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit, QComboBox, QCheckBox
 from PyQt5.QtChart import QChart, QChartView, QBarSet, QBarSeries, QBarCategoryAxis, QValueAxis
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QPainter, QColor, QCursor
 from PyQt5.QtWidgets import QToolTip
 import json
@@ -11,8 +11,9 @@ import numpy as np
 from mpl_toolkits.mplot3d import Axes3D
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
-from volatility_surface import VolatilitySurface
+from volatility_surface import BatchedVolatilitySurface
 from option_chain import OptionChainService
+import time
 
 class VolatilitySurfaceChart(QWidget):
     def __init__(self):
@@ -25,18 +26,14 @@ class VolatilitySurfaceChart(QWidget):
         # Add root selector
         self.root_selector = QComboBox()
         self.root_selector.currentTextChanged.connect(self.on_root_changed)
+        controls_layout.addWidget(QLabel("Symbol:"))
         controls_layout.addWidget(self.root_selector)
         
         # Add expiry selector
         self.expiry_selector = QComboBox()
         self.expiry_selector.currentTextChanged.connect(self.on_expiry_changed)
+        controls_layout.addWidget(QLabel("Expiry:"))
         controls_layout.addWidget(self.expiry_selector)
-        
-        # Add toggle for expiry filtering
-        self.expiry_filter = QCheckBox("Stream All Expiries")
-        self.expiry_filter.setToolTip("Enable streaming for all expiries (default: 0DTE only)")
-        self.expiry_filter.stateChanged.connect(self.on_expiry_filter_changed)
-        controls_layout.addWidget(self.expiry_filter)
         
         # Add controls to main layout
         self.layout.addLayout(controls_layout)
@@ -47,41 +44,86 @@ class VolatilitySurfaceChart(QWidget):
         self.surface_ax = self.figure.add_subplot(111)
         self.layout.addWidget(self.canvas)
         
-        # Initialize volatility surface
-        self.vol_surface = VolatilitySurface()
-        print("VolatilitySurfaceChart initialized")
+        # Initialize volatility surface with 1-second update interval
+        self.vol_surface = BatchedVolatilitySurface(update_interval_ms=1000)
+        self.vol_surface.surface_updated.connect(self.on_surface_updated)
         
         # Debug label
         self.debug_label = QLabel("No quotes processed yet")
         self.layout.addWidget(self.debug_label)
         
-        # Start update timer
-        self.timer = QtCore.QTimer()
-        self.timer.timeout.connect(self.update_surface)
-        self.timer.start(1000)  # Update display every second
+        # Setup update timer to limit GUI refresh rate
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.update_surface)
+        self.update_timer.start(1000)  # Update GUI every second
         
-        # Get today's date in YYYYMMDD format
-        self.today_expiry = date.today().strftime("%Y%m%d")
-        
+        # Track pending updates
+        self.pending_update = False
+        self.last_update = time.time()
+
     def on_root_changed(self, root):
         """Handle root selection change"""
         if root:
             # Update expiry selector
             expiries = self.vol_surface.get_expiries(root)
+            current_expiry = self.expiry_selector.currentText()
+            
             self.expiry_selector.clear()
             self.expiry_selector.addItems(expiries)
-            if expiries:
+            
+            # Try to restore previous selection or select first available
+            if current_expiry in expiries:
+                self.expiry_selector.setCurrentText(current_expiry)
+            elif expiries:
                 self.expiry_selector.setCurrentIndex(0)
-            self.update_surface()
+            
+            self.request_update()
         
     def on_expiry_changed(self, expiry):
         """Handle expiry selection change"""
-        if expiry and hasattr(self, 'stream_manager'):
-            self.stream_manager.set_selected_expiry(expiry)
-        self.update_surface()
+        if expiry:
+            self.request_update()
+
+    def on_surface_updated(self, root, expiry):
+        """Handle surface update signal"""
+        # Update root selector if needed
+        if root not in [self.root_selector.itemText(i) for i in range(self.root_selector.count())]:
+            self.root_selector.addItem(root)
+            if not self.root_selector.currentText():
+                self.root_selector.setCurrentText(root)
         
+        # Update expiry selector
+        if root == self.root_selector.currentText():
+            expiries = self.vol_surface.get_expiries(root)
+            current_expiry = self.expiry_selector.currentText()
+            
+            self.expiry_selector.clear()
+            self.expiry_selector.addItems(expiries)
+            
+            # Try to restore previous selection or select first available
+            if current_expiry in expiries:
+                self.expiry_selector.setCurrentText(current_expiry)
+            elif expiries:
+                self.expiry_selector.setCurrentIndex(0)
+            
+            # Request update if this is the currently selected expiry
+            if expiry == self.expiry_selector.currentText():
+                self.request_update()
+
+    def request_update(self):
+        """Request a surface update"""
+        self.pending_update = True
+
     def update_surface(self):
         """Update the volatility surface plot"""
+        # Only update if there's a pending update and enough time has passed
+        now = time.time()
+        if not self.pending_update or (now - self.last_update) < 0.5:  # Limit to 2 updates per second
+            return
+            
+        self.pending_update = False
+        self.last_update = now
+        
         try:
             self.surface_ax.clear()
             
@@ -91,160 +133,89 @@ class VolatilitySurfaceChart(QWidget):
             if not root or not expiry:
                 return
             
-            # Debug prints
-            print(f"\nUpdating surface plot for {root} with expiry {expiry}...")
-            
             # Get surface data for selected expiry
             surface_data = self.vol_surface.get_surface_data(root, expiry)
             if surface_data and surface_data[0]:  # Check if we have moneyness data
-                moneyness, vols, strikes = surface_data[0]  # Unpack the first tuple
-                print(f"Plotting {len(moneyness)} points for {root}")
-                print(f"Moneyness range: {min(moneyness):.3f} to {max(moneyness):.3f}")
-                print(f"Vol range: {min(vols):.3f} to {max(vols):.3f}")
+                moneyness, bid_vols, ask_vols, strikes = surface_data[0]
                 
                 # Plot vertical line at spot price (moneyness = 0)
                 self.surface_ax.axvline(x=0, color='r', linestyle='--', alpha=0.5, label='Spot')
                 
-                # Plot scatter with different colors for puts and calls
-                put_mask = [m < 0 for m in moneyness]  # Puts are typically when moneyness < 0
-                call_mask = [m >= 0 for m in moneyness]
-                
-                # Plot puts in red, calls in blue
+                # Plot puts and calls for all strikes
+                # Plot puts
                 self.surface_ax.scatter(
-                    [m for i, m in enumerate(moneyness) if put_mask[i]], 
-                    [v for i, v in enumerate(vols) if put_mask[i]], 
-                    color='red', alpha=0.6, label='Puts'
+                    moneyness, 
+                    bid_vols,
+                    color='darkred', alpha=0.6, label='Puts Bid'
                 )
                 self.surface_ax.scatter(
-                    [m for i, m in enumerate(moneyness) if call_mask[i]], 
-                    [v for i, v in enumerate(vols) if call_mask[i]], 
-                    color='blue', alpha=0.6, label='Calls'
+                    moneyness, 
+                    ask_vols,
+                    color='red', alpha=0.6, label='Puts Ask'
                 )
                 
-                # Add strike labels for reference
-                for i, (m, v, k) in enumerate(zip(moneyness, vols, strikes)):
-                    if i % 3 == 0:  # Label every third point
+                # Plot calls
+                self.surface_ax.scatter(
+                    moneyness, 
+                    bid_vols,
+                    color='darkblue', alpha=0.6, label='Calls Bid'
+                )
+                self.surface_ax.scatter(
+                    moneyness, 
+                    ask_vols,
+                    color='blue', alpha=0.6, label='Calls Ask'
+                )
+                
+                # Add strike labels for reference (only every 5th point)
+                for i, (m, v, k) in enumerate(zip(moneyness, bid_vols, strikes)):
+                    if i % 5 == 0:  # Label every fifth point
                         self.surface_ax.annotate(f'{k:.1f}',
                                                (m, v),
                                                xytext=(0, 5),
                                                textcoords='offset points',
                                                ha='center',
                                                fontsize=8)
-            else:
-                print(f"No valid surface data for {root}")
                 
-            self.surface_ax.set_xlabel('Log Moneyness')
-            self.surface_ax.set_ylabel('Implied Volatility')
-            self.surface_ax.set_title(f'Volatility Surface - {root} ({expiry})')
-            self.surface_ax.grid(True)
-            self.surface_ax.legend()
-            
-            # Set reasonable y-axis limits
-            self.surface_ax.set_ylim(0, 1.0)  # Typical IV range
-            
+                self.surface_ax.set_xlabel('Log Moneyness')
+                self.surface_ax.set_ylabel('Implied Volatility')
+                self.surface_ax.set_title(f'Volatility Surface - {root} ({expiry})')
+                self.surface_ax.grid(True)
+                self.surface_ax.legend()
+                
+                # Set reasonable y-axis limits
+                self.surface_ax.set_ylim(0, 1.0)  # Typical IV range
+                
+                # Update debug label with bid/ask info
+                self.debug_label.setText(
+                    f"Plotting {len(moneyness)} points | "
+                    f"Moneyness: {min(moneyness):.3f} to {max(moneyness):.3f} | "
+                    f"Bid IV: {min(bid_vols):.3%} to {max(bid_vols):.3%} | "
+                    f"Ask IV: {min(ask_vols):.3%} to {max(ask_vols):.3%}"
+                )
+            else:
+                self.debug_label.setText(f"No valid surface data for {root} ({expiry})")
+                
             # Refresh the plot
             self.canvas.draw()
             
         except Exception as e:
             print(f"Error updating surface: {str(e)}")
-            self.log_error(f"Surface update error: {str(e)}")
-            
-    def update_surface_timer(self):
-        """Timer callback to update the surface periodically"""
-        self.update_surface()
-        
-    def closeEvent(self, event):
-        self.timer.stop()
-        super().closeEvent(event)
-        
-    def log_error(self, error):
-        """Log an error message"""
-        print(f"ERROR: {error}")
-        
-    def update_surface_timer(self):
-        """Timer callback to update the surface periodically"""
-        self.update_surface()
-        
-    def closeEvent(self, event):
-        self.timer.stop()
-        super().closeEvent(event)
-        
-    def log_error(self, error):
-        """Log an error message"""
-        print(f"ERROR: {error}")
-        
+
     def update_quote(self, contract, quote):
         """Process quote and update the volatility surface"""
         try:
-            root = contract['root']
-            expiry = str(contract['expiration'])
-            
-            # Update root selector if needed
-            if root not in [self.root_selector.itemText(i) for i in range(self.root_selector.count())]:
-                self.root_selector.addItem(root)
-                if not self.root_selector.currentText():  # If nothing selected, select this root
-                    self.root_selector.setCurrentText(root)
-            
-            # Process the quote
+            # Buffer the quote for batch processing
             self.vol_surface.update_quote(contract, quote)
-            
-            # Always update expiry selector for the current root
-            if root == self.root_selector.currentText():
-                expiries = self.vol_surface.get_expiries(root)
-                current_expiry = self.expiry_selector.currentText()
-                
-                # Update expiry dropdown while preserving selection
-                self.expiry_selector.clear()
-                self.expiry_selector.addItems(expiries)
-                
-                # Restore previous selection if it exists, otherwise select first item
-                if current_expiry in expiries:
-                    self.expiry_selector.setCurrentText(current_expiry)
-                elif expiries:
-                    self.expiry_selector.setCurrentIndex(0)
-            
-            # Update debug info
-            strike = int(contract['strike']) / 1000
-            right = contract['right']
-            bid = quote.get('bid', 'N/A')
-            ask = quote.get('ask', 'N/A')
-            
-            # Get current quote count for this root
-            quote_count = 0
-            if root in self.vol_surface.quotes:
-                quote_count = len(self.vol_surface.quotes[root])
-                print(f"Processed quote: {root} {strike} {right} {expiry} | "
-                      f"B: {bid} A: {ask} | "
-                      f"Total quotes: {quote_count}")
-            
-            # Only update debug label if this is for the selected root
-            if root == self.root_selector.currentText():
-                self.debug_label.setText(
-                    f"Last quote: {root} {strike} {right} {expiry} | "
-                    f"B: {bid} A: {ask} | "
-                    f"Total quotes: {quote_count}"
-                )
-                
         except Exception as e:
             print(f"Error processing quote: {str(e)}")
 
-    def on_expiry_filter_changed(self, state):
-        """Handle expiry filter toggle"""
-        root = self.root_selector.currentText()
-        if not state:  # If unchecked, filter to only 0DTE
-            if root in self.vol_surface.quotes:
-                filtered_quotes = {}
-                for key, quote in self.vol_surface.quotes[root].items():
-                    strike, expiry, right = key
-                    if expiry == datetime.strptime(self.today_expiry, "%Y%m%d").date():
-                        filtered_quotes[key] = quote
-                
-                # Update quotes dictionary with filtered quotes
-                self.vol_surface.quotes[root] = filtered_quotes
-                print(f"Filtered to 0DTE only. Kept {len(filtered_quotes)} quotes.")
-        
-        # Update the surface
-        self.update_surface()
+    def closeEvent(self, event):
+        """Clean up resources on close"""
+        if hasattr(self, 'vol_surface'):
+            self.vol_surface.timer.stop()
+        if hasattr(self, 'update_timer'):
+            self.update_timer.stop()
+        super().closeEvent(event)
 
 class TradeActivityChart(QWidget):
     def __init__(self):
@@ -396,13 +367,23 @@ class StreamWindow(QMainWindow):
         
         layout.addWidget(left_panel)
         
-        # Right panel for bar chart
+        # Right panel split between trade chart and volatility surface
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        
+        # Trade activity chart
         self.trade_chart = TradeActivityChart()
-        layout.addWidget(self.trade_chart)
+        right_layout.addWidget(self.trade_chart)
+        
+        # Volatility surface chart
+        self.vol_surface_chart = VolatilitySurfaceChart()
+        right_layout.addWidget(self.vol_surface_chart)
+        
+        layout.addWidget(right_panel)
         
         # Set layout proportions
         layout.setStretch(0, 1)  # Left panel
-        layout.setStretch(1, 1)  # Right panel
+        layout.setStretch(1, 2)  # Right panel
         
     def handle_trade(self, contract, trade, context):
         self.trade_count += 1
@@ -438,3 +419,9 @@ class StreamWindow(QMainWindow):
     def log_error(self, error):
         timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         self.trade_log.append(f"{timestamp} - ERROR: {error}\n")
+        
+    def closeEvent(self, event):
+        """Clean up resources on close"""
+        if hasattr(self, 'vol_surface_chart'):
+            self.vol_surface_chart.closeEvent(event)
+        super().closeEvent(event)

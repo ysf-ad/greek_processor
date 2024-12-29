@@ -132,7 +132,7 @@ class OptionChainService:
             return "SELL"
 
         # Step 5: Tick test using midpoint comparison
-        mid_price = (bid + ask) / 2
+        mid_price = (bid + ask) / 2 
         next_mid_price = (next_bid + next_ask) / 2
         if next_mid_price > mid_price:
             return "BUY"
