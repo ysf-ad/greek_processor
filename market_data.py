@@ -1,92 +1,131 @@
-from datetime import datetime, date, timedelta
 import requests
-import json
+import datetime
+from typing import Dict, Optional
 
-class MarketDataService:
-    """Handles all market data related operations"""
-    
+class MarketData:
     def __init__(self):
-        self.base_url = "http://127.0.0.1:25510"  # Theta Terminal local server
+        self.spot_price_data: Dict[int, float] = {}  # ms_of_day -> price mapping
 
-    def get_current_spot_price(self, root):
-        """Get current spot price for a symbol using Greeks snapshot"""
-        try:
-            # Get today's date in YYYYMMDD format
-            today = date.today().strftime("%Y%m%d")
-            
-            # Build URL with required parameters
-            url = f"{self.base_url}/v2/bulk_snapshot/option/greeks"
-            params = {
-                'root': root,
-                'exp': today,  # Current expiry, will get under_price regardless
-                'use_csv': 'false'  # Use JSON format
-            }
-            
-            response = requests.get(url, params=params)
-            if response.status_code == 200:
-                data = response.json()
-                if 'response' in data and data['response']:
-                    # Get under_price from the response
-                    under_price = data['response'].get('under_price')
-                    if under_price:
-                        return float(under_price)
-            
-            print(f"Error getting spot price: status {response.status_code}")
-            print(f"Response: {response.text}")
-            return None
-        except Exception as e:
-            print(f"Error getting spot price: {str(e)}")
-            return None
-
-    def list_option_contracts(self, root):
-        """Get list of available option contracts for a root"""
-        try:
-            # Get today's date in YYYYMMDD format
-            today = date.today().strftime("%Y%m%d")
-            
-            # Build URL with required parameters
-            url = f"{self.base_url}/v2/list/contracts/option/quote"
-            params = {
-                'root': root,
-                'start_date': today
-            }
-            
-            print(f"Getting contracts: {url} with params {params}")
-            response = requests.get(url, params=params)
-            
-            if response.status_code == 200:
-                return response.json()
-            else:
-                print(f"Error listing contracts: status {response.status_code}")
-                print(f"Response: {response.text}")
-        except Exception as e:
-            print(f"Error listing contracts: {str(e)}")
-        return None
-
-    def get_quote(self, contract):
-        """Get latest quote for a specific contract"""
-        try:
-            # Format contract parameters
-            root = contract['root']
-            expiry = contract['expiration']
-            strike = float(contract['strike'])
-            right = contract['right']
-            
-            # Format strike properly (handle decimals)
-            if strike < 1000:
-                strike = int(strike * 1000)
-            else:
-                strike = int(strike)
-            
-            url = f"{self.base_url}/v2/hist/quote/option/{root}/{expiry}/{strike}/{right}/latest"
-            print(f"Getting quote: {url}")  # Debug
-            
-            response = requests.get(url)
-            if response.status_code == 200:
-                return response.json()
-            else:
-                print(f"Error getting quote: status {response.status_code}")
-        except Exception as e:
-            print(f"Error getting quote: {str(e)}")
-        return None
+    def get_first_strike(self, root: str, date: str) -> Optional[int]:
+        """Get the first available strike for a given root and date"""
+        url = f"http://127.0.0.1:25510/v2/list/strikes?root={root}&exp={date}"
+        response = requests.get(url)
         
+        if response.status_code != 200:
+            print(f"Error getting strikes: {response.status_code}")
+            return None
+            
+        data = response.json()
+        if not data["response"]:
+            print("No strikes found")
+            return None
+            
+        return data["response"][0]
+
+    def load_spot_prices(self, root: str, date: str) -> None:
+        """Load spot prices for a given root and date"""
+        # First get a valid strike
+        strike = self.get_first_strike(root, date)
+        if not strike:
+            print("Could not get valid strike")
+            return
+        
+        # Construct URL for greeks endpoint
+        url = f"http://127.0.0.1:25510/v2/hist/option/greeks?root={root}&exp={date}&strike={strike}&right=C&start_date={date}&end_date={date}&ivl=500"
+        response = requests.get(url)
+        
+        if response.status_code != 200:
+            print(f"Error getting spot prices: {response.status_code}")
+            return
+            
+        data = response.json()
+        
+        # Get indices from header format
+        header_format = data["header"]["format"]
+        MS_IDX = header_format.index("ms_of_day")
+        PRICE_IDX = header_format.index("underlying_price")
+        
+        # Create mapping of ms_of_day to underlying_price
+        self.spot_price_data = {
+            tick[MS_IDX]: tick[PRICE_IDX]
+            for tick in data["response"]
+        }
+        
+        print(f"Loaded {len(self.spot_price_data)} spot price points")
+
+    def get_spot_price(self, ms_of_day: int) -> Optional[float]:
+        """Get spot price closest to given ms_of_day"""
+        if not self.spot_price_data:
+            print("No spot price data loaded")
+            return None
+            
+        # Find closest time
+        closest_ms = min(self.spot_price_data.keys(), 
+                        key=lambda x: abs(x - ms_of_day))
+        
+        return self.spot_price_data[closest_ms]
+
+    @staticmethod
+    def get_day_trade_quotes(root, day):
+        # Initial request
+        url = f"http://127.0.0.1:25510/v2/bulk_hist/option/trade_quote?root={root}&exp={day}&start_date={day}&end_date={day}&exclusive=true"
+        response = requests.get(url)
+        
+        if response.status_code != 200:
+            print(f"Error: {response.status_code}")
+            return None
+            
+        data = response.json()
+        all_responses = data["response"]
+        print(f"got first page")
+        
+        # Handle pagination
+        while True:
+            next_page = data["header"].get("next_page")
+            if next_page == "null" or next_page is None:
+                break
+                
+            response = requests.get(next_page)
+            if response.status_code != 200:
+                print(f"Error fetching next page: {response.status_code}")
+                break
+            print(f"got next page")
+                
+            data = response.json()
+            all_responses.extend(data["response"])
+        
+        return {"header": data["header"], "response": all_responses}
+
+    @staticmethod
+    def get_day_trades(root: str, day: str):
+        print(f"getting trades for {root} on {day}")
+        """Get all trades for a given root on a specific day"""
+        url = f"http://127.0.0.1:25510/v2/bulk_hist/option/trade?root={root}&exp=0&start_date={day}&end_date={day}"
+        response = requests.get(url)
+        
+        if response.status_code != 200:
+            print(f"Error: {response.status_code}")
+            return None
+            
+        data = response.json()
+        all_responses = data["response"]
+        print(f"got first page")
+        
+        # Handle pagination
+        while True:
+            next_page = data["header"].get("next_page")
+            if next_page == "null" or next_page is None:
+                break
+                
+            response = requests.get(next_page)
+            if response.status_code != 200:
+                print(f"Error fetching next page: {response.status_code}")
+                break
+            print(f"got next page")
+                
+            data = response.json()
+            all_responses.extend(data["response"])
+        
+        return {"header": data["header"], "response": all_responses}
+
+
