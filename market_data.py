@@ -1,6 +1,7 @@
 import requests
 import datetime
 from typing import Dict, Optional
+import json
 
 class MarketData:
     def __init__(self):
@@ -69,32 +70,60 @@ class MarketData:
     def get_day_trade_quotes(root, day):
         # Initial request
         url = f"http://127.0.0.1:25510/v2/bulk_hist/option/trade_quote?root={root}&exp={day}&start_date={day}&end_date={day}&exclusive=true"
-        response = requests.get(url)
         
-        if response.status_code != 200:
-            print(f"Error: {response.status_code}")
-            return None
-            
-        data = response.json()
-        all_responses = data["response"]
-        print(f"got first page")
-        
-        # Handle pagination
-        while True:
-            next_page = data["header"].get("next_page")
-            if next_page == "null" or next_page is None:
-                break
-                
-            response = requests.get(next_page)
+        try:
+            response = requests.get(url)
             if response.status_code != 200:
-                print(f"Error fetching next page: {response.status_code}")
-                break
-            print(f"got next page")
-                
-            data = response.json()
-            all_responses.extend(data["response"])
-        
-        return {"header": data["header"], "response": all_responses}
+                print(f"Error: {response.status_code}")
+                return None
+            
+            # Try to parse JSON with error handling
+            try:
+                data = response.json()
+            except requests.exceptions.JSONDecodeError as e:
+                print(f"JSON decode error at position {e.pos}. Attempting to truncate and parse...")
+                # Try to parse the valid portion of the response
+                valid_json = response.text[:e.pos]
+                # Find the last complete record
+                last_bracket = valid_json.rfind(']')
+                if last_bracket != -1:
+                    valid_json = valid_json[:last_bracket+1] + ']}'
+                    data = json.loads(valid_json)
+                else:
+                    print("Could not recover valid JSON")
+                    return None
+            
+            all_responses = data["response"]
+            print(f"got first page with {len(all_responses)} responses")
+            
+            # Handle pagination
+            while True:
+                next_page = data["header"].get("next_page")
+                if next_page == "null" or next_page is None:
+                    break
+                    
+                try:
+                    response = requests.get(next_page)
+                    if response.status_code != 200:
+                        print(f"Error fetching next page: {response.status_code}")
+                        break
+                    
+                    data = response.json()
+                    all_responses.extend(data["response"])
+                    print(f"got next page with {len(data['response'])} responses")
+                    
+                except requests.exceptions.JSONDecodeError as e:
+                    print(f"Error on pagination, stopping here with {len(all_responses)} total responses")
+                    break
+                except Exception as e:
+                    print(f"Unexpected error during pagination: {str(e)}")
+                    break
+            
+            return {"header": data["header"], "response": all_responses}
+            
+        except Exception as e:
+            print(f"Error fetching trade quotes: {str(e)}")
+            return None
 
     @staticmethod
     def get_day_trades(root: str, day: str):

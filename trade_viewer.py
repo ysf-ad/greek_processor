@@ -15,6 +15,7 @@ class Trade:
     right: str
     strike: float
     spot_price: float
+    expiry: int
     iv: float = None
 
 def calculate_iv(trade: Trade) -> float:
@@ -37,19 +38,95 @@ def calculate_iv(trade: Trade) -> float:
     except:
         return None
 
+def update(val):
+    try:
+        current_time = time_slider.val
+        
+        # Clear the plot
+        ax.clear()
+        
+        # Get unique expiries
+        expiries = sorted(list(set(t.expiry for t in all_trades)))
+        
+        # Create a color map for different expiries
+        colors = plt.cm.rainbow(np.linspace(0, 1, len(expiries)))
+        
+        for expiry, color in zip(expiries, colors):
+            # Find trades for this expiry
+            expiry_trades = [t for t in all_trades if t.expiry == expiry]
+            
+            try:
+                # Find current index in these trades
+                current_idx = next(i for i, t in enumerate(expiry_trades) if t.time >= current_time)
+                start_idx = max(0, current_idx - 100)
+                end_idx = min(len(expiry_trades), current_idx + 100)
+                window_trades = expiry_trades[start_idx:end_idx]
+                
+                if window_trades:
+                    # Get the latest spot price
+                    latest_spot = window_trades[-1].spot_price
+                    
+                    # Calculate relative strikes and IVs
+                    relative_strikes = [(t.strike/latest_spot - 1) * 100 for t in window_trades]
+                    ivs = [t.iv * 100 for t in window_trades]
+                    
+                    # Plot trades
+                    ax.scatter(relative_strikes, ivs, s=20, alpha=0.6,
+                             c=['green' if t.right == 'C' else 'red' for t in window_trades],
+                             marker='o' if expiry == expiries[0] else '^',  # Different marker for each expiry
+                             label=f'Trades (Exp: {expiry})')
+                    
+                    # Fit polynomial
+                    coeffs = np.polyfit(relative_strikes, ivs, 3)
+                    x_smooth = np.linspace(min(relative_strikes), max(relative_strikes), 100)
+                    y_smooth = np.polyval(coeffs, x_smooth)
+                    ax.plot(x_smooth, y_smooth, '-', color=color, linewidth=2, alpha=0.7,
+                           label=f'Fit (Exp: {expiry})')
+            except StopIteration:
+                # No trades after current_time for this expiry
+                continue
+        
+        # Add vertical line at current spot price (using the last valid spot price)
+        if 'latest_spot' in locals():
+            ax.axvline(x=0, color='blue', linestyle='--', alpha=0.5, label=f'Spot: {latest_spot:.2f}')
+        
+        # Configure plot
+        ax.set_xlabel('% Away from Spot')
+        ax.set_ylabel('Implied Volatility (%)')
+        ax.set_title(f'Option Trades ({current_time:.2f} hours)')
+        ax.grid(True, alpha=0.3)
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        
+        # Set reasonable axis limits
+        ax.set_xlim(-20, 20)
+        ax.set_ylim(0, 100)
+        
+        # Adjust layout to prevent legend cutoff
+        plt.tight_layout()
+        
+        fig.canvas.draw_idle()
+            
+    except Exception as e:
+        print(f"Error in update: {str(e)}")
+        import traceback
+        traceback.print_exc()
+
 def plot_trades():
+    global time_slider, ax, fig, all_trades
+    
     # Initialize and load data
     md = market_data.MarketData()
-    target_date = "20241220"
+    target_date = "20250103"
+    root = "SPXW"
     
     print("Loading spot price data...")
-    md.load_spot_prices("SPY", target_date)
+    md.load_spot_prices(root, target_date)
     if not md.spot_price_data:
         print("Failed to load spot price data")
         return
     
     print("Loading trade data...")
-    trade_data = market_data.MarketData.get_day_trades("SPY", target_date)
+    trade_data = market_data.MarketData.get_day_trades(root, target_date)
     if not trade_data:
         print("No trades found")
         return
@@ -63,17 +140,13 @@ def plot_trades():
     # Pre-process spot price data
     spot_times = sorted(md.spot_price_data.keys())
     
-    # Collect ALL trades with their timestamps
+    # Collect all trades
     all_trades = []
     
     print(f"Number of responses: {len(trade_data['response'])}")
     
-
     for response in trade_data["response"]:
         expiry = response["contract"]["expiration"]
-        if str(expiry) != target_date:
-            continue
-            
         strike = response["contract"]["strike"] / 1000
         
         for tick in response["ticks"]:
@@ -88,107 +161,33 @@ def plot_trades():
                 size=tick[SIZE_IDX],
                 right=response["contract"]["right"],
                 strike=strike,
-                spot_price=spot_price
+                spot_price=spot_price,
+                expiry=expiry
             )
             trade.iv = calculate_iv(trade)
+            
             if trade.iv is not None:
-                all_trades.append((ms_of_day, trade))
+                all_trades.append(trade)
     
-    # Sort by time
-    all_trades.sort(key=lambda x: x[0])
+    # Sort trades by time
+    all_trades.sort(key=lambda x: x.time)
     print(f"Collected {len(all_trades)} valid trades")
     
     if not all_trades:
         print("No valid trades to plot")
         return
     
-    # Create figure and subplots
+    # Create figure
     fig, ax = plt.subplots(figsize=(15, 8))
-    plt.subplots_adjust(bottom=0.3)  # Make more room for multiple sliders
+    plt.subplots_adjust(bottom=0.2)  # Make room for slider
     
-    # Get time range and calculate initial axis limits
-    min_time = all_trades[0][1].time
-    max_time = all_trades[-1][1].time
+    # Calculate time range
+    min_time = min(t.time for t in all_trades)
+    max_time = max(t.time for t in all_trades)
     initial_time = min_time
     
-    # Calculate initial axis limits from all trades
-    all_strikes = [t.strike for _, t in all_trades]
-    all_ivs = [t.iv * 100 for _, t in all_trades]
-    all_spots = [t.spot_price for _, t in all_trades]
-    
-    x_min = min(min(all_strikes), min(all_spots)) * 0.99
-    x_max = max(max(all_strikes), max(all_spots)) * 1.01
-    y_min = min(all_ivs) * 0.5
-    y_max = max(all_ivs) * 1.1
-    
-    x_range = x_max - x_min
-    y_range = y_max - y_min
-    
-    def update(val):
-        current_time = time_slider.val
-        zoom_level = zoom_slider.val
-        x_pan = x_slider.val
-        y_pan = y_slider.val
-        
-        # Find index of current time in all_trades
-        current_idx = next(i for i, (ms, t) in enumerate(all_trades) if t.time >= current_time)
-        
-        # Get trades in window
-        start_idx = max(0, current_idx - 1000)
-        end_idx = min(len(all_trades), current_idx + 1000)
-        window_trades = [t for _, t in all_trades[start_idx:end_idx]]
-        
-        # Clear previous plot
-        ax.clear()
-        
-        # Plot all trades in black
-        ax.scatter([t.strike for t in window_trades], 
-                  [t.iv * 100 for t in window_trades],
-                  s=20,
-                  color='black',
-                  alpha=0.5)
-        
-        # Get latest spot price for current time
-        if window_trades:
-            latest_spot = window_trades[-1].spot_price
-            ax.axvline(x=latest_spot, color='blue', linestyle='--', alpha=0.5, 
-                      label=f'Spot: {latest_spot:.0f}')
-        
-        # Fixed center points
-        center_x = (x_min + x_max) / 2
-        center_y = (y_min + y_max) / 2
-        
-        # Calculate view ranges based on zoom
-        view_x_range = x_range / zoom_level
-        view_y_range = y_range / zoom_level
-        
-        # Calculate limits with zoom and pan
-        x_left = center_x - view_x_range/2 + (x_pan * x_range/2)
-        x_right = center_x + view_x_range/2 + (x_pan * x_range/2)
-        y_bottom = center_y - view_y_range/2 + (y_pan * y_range/2)
-        y_top = center_y + view_y_range/2 + (y_pan * y_range/2)
-        
-        ax.set_xlim(x_left, x_right)
-        ax.set_ylim(y_bottom, y_top)
-        
-        # Configure axes
-        ax.set_xlabel('Strike Price')
-        ax.set_ylabel('Implied Volatility (%)')
-        window_start_time = window_trades[0].time if window_trades else current_time
-        window_end_time = window_trades[-1].time if window_trades else current_time
-        ax.set_title(f'Option Trades ({window_start_time:.2f} - {window_end_time:.2f} hours)\n'
-                     f'Showing {len(window_trades)} trades')
-        ax.grid(True, alpha=0.3)
-        ax.legend()
-        
-        fig.canvas.draw_idle()
-    
-    # Create sliders
-    time_slider_ax = plt.axes([0.1, 0.20, 0.65, 0.03])
-    zoom_slider_ax = plt.axes([0.1, 0.15, 0.65, 0.03])
-    x_slider_ax = plt.axes([0.1, 0.10, 0.65, 0.03])
-    y_slider_ax = plt.axes([0.1, 0.05, 0.65, 0.03])
-    
+    # Create time slider
+    time_slider_ax = plt.axes([0.1, 0.05, 0.65, 0.03])
     time_slider = Slider(
         ax=time_slider_ax,
         label='Time (hours)',
@@ -197,39 +196,14 @@ def plot_trades():
         valinit=initial_time
     )
     
-    zoom_slider = Slider(
-        ax=zoom_slider_ax,
-        label='Zoom',
-        valmin=0.1,
-        valmax=10,
-        valinit=1.0
-    )
-    
-    x_slider = Slider(
-        ax=x_slider_ax,
-        label='X Pan',
-        valmin=-1,
-        valmax=1,
-        valinit=0.0
-    )
-    
-    y_slider = Slider(
-        ax=y_slider_ax,
-        label='Y Pan',
-        valmin=-1,
-        valmax=1,
-        valinit=0.0
-    )
-    
-    # Connect all sliders to update function
+    # Connect slider
     time_slider.on_changed(update)
-    zoom_slider.on_changed(update)
-    x_slider.on_changed(update)
-    y_slider.on_changed(update)
     
     # Initial plot
     update(initial_time)
+    
     plt.show()
 
 if __name__ == "__main__":
     plot_trades() 
+    
