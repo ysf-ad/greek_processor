@@ -6,7 +6,7 @@ from typing import List, Dict
 from py_vollib.black_scholes_merton.implied_volatility import implied_volatility as iv_bsm
 from matplotlib.widgets import Slider
 from scipy.optimize import minimize
-import requests
+from scipy import optimize
 
 @dataclass
 class Trade:
@@ -21,132 +21,6 @@ class Trade:
     ask: float = None
     is_buyer: bool = None  # Add aggressor flag
     iv: float = None
-
-@dataclass
-class GreekData:
-    time: float  # Hours
-    ms_of_day: int
-    bid: float
-    ask: float
-    delta: float
-    theta: float
-    vega: float
-    rho: float
-    epsilon: float
-    lambda_: float
-    implied_vol: float
-    iv_error: float
-    spot_price: float
-    strike: float
-    right: str
-
-def fetch_greeks(root: str, expiry: int, strike: int, right: str, start_date: int, end_date: int, ivl: int = 90000) -> List[GreekData]:
-    url = f"http://127.0.0.1:25510/v2/hist/option/greeks"
-    params = {
-        "root": root,
-        "exp": expiry,
-        "strike": strike,
-        "right": right,
-        "start_date": start_date,
-        "end_date": end_date,
-        "ivl": ivl
-    }
-    
-    try:
-        response = requests.get(url, params=params)
-        data = response.json()
-        
-        if "response" not in data:
-            print(f"No data for {root} {strike} {right}")
-            return []
-        
-        # Get indices from format
-        format_list = data["header"]["format"]
-        ms_idx = format_list.index("ms_of_day")
-        bid_idx = format_list.index("bid")
-        ask_idx = format_list.index("ask")
-        delta_idx = format_list.index("delta")
-        theta_idx = format_list.index("theta")
-        vega_idx = format_list.index("vega")
-        rho_idx = format_list.index("rho")
-        epsilon_idx = format_list.index("epsilon")
-        lambda_idx = format_list.index("lambda")
-        iv_idx = format_list.index("implied_vol")
-        iv_error_idx = format_list.index("iv_error")
-        spot_idx = format_list.index("underlying_price")
-        
-        greek_data = []
-        for tick in data["response"]:
-            if tick[iv_idx] > 0:  # Only include valid IV data
-                greek_data.append(GreekData(
-                    time=tick[ms_idx] / (1000 * 3600),  # Convert to hours
-                    ms_of_day=tick[ms_idx],
-                    bid=tick[bid_idx],
-                    ask=tick[ask_idx],
-                    delta=tick[delta_idx],
-                    theta=tick[theta_idx],
-                    vega=tick[vega_idx],
-                    rho=tick[rho_idx],
-                    epsilon=tick[epsilon_idx],
-                    lambda_=tick[lambda_idx],
-                    implied_vol=tick[iv_idx],
-                    iv_error=tick[iv_error_idx],
-                    spot_price=tick[spot_idx],
-                    strike=strike/1000,  # Convert to actual strike
-                    right=right
-                ))
-        
-        return greek_data
-    except Exception as e:
-        print(f"Error fetching data: {str(e)}")
-        return []
-
-def get_0dte_contracts(root: str, target_date: int) -> List[Dict]:
-    """Get all 0DTE contracts for the given date"""
-    url = f"http://127.0.0.1:25510/v2/list/contracts/option/quote"
-    params = {
-        "root": root,
-        "start_date": target_date
-    }
-    
-    try:
-        print(f"Fetching contracts from: {url} with params: {params}")
-        response = requests.get(url, params=params)
-        data = response.json()
-        
-        if "response" not in data:
-            print(f"No contracts found for {root} on {target_date}")
-            return []
-        
-        print(f"Got {len(data['response'])} total contracts")
-        
-        # Get indices from format
-        format_list = data["header"]["format"]
-        root_idx = format_list.index("root")
-        exp_idx = format_list.index("expiration")
-        strike_idx = format_list.index("strike")
-        right_idx = format_list.index("right")
-        
-        # Filter for contracts expiring on target_date
-        contracts = []
-        for contract in data["response"]:
-            if contract[exp_idx] == target_date:  # Compare with target_date
-                contracts.append({
-                    "root": contract[root_idx],
-                    "expiration": contract[exp_idx],
-                    "strike": contract[strike_idx],
-                    "right": contract[right_idx]
-                })
-        
-        print(f"Found {len(contracts)} contracts expiring on {target_date}")
-        if len(contracts) > 0:
-            print(f"Sample contract: {contracts[0]}")
-        return contracts
-    except Exception as e:
-        print(f"Error fetching contracts: {str(e)}")
-        print(f"URL: {url}")
-        print(f"Params: {params}")
-        return []
 
 def calculate_iv(trade: Trade) -> float:
     try:
@@ -168,6 +42,51 @@ def calculate_iv(trade: Trade) -> float:
     except:
         return None
 
+def fit_polynomial(x, y, trades, degree=4):
+    """
+    Fit a polynomial with outlier removal for the bottom 15% of strikes.
+    """
+    if len(x) < degree + 1:
+        return np.polyfit(x, y, min(len(x)-1, 2))
+    
+    # Group data by strike
+    strike_data = {}
+    for i, (xi, yi) in enumerate(zip(x, y)):
+        if xi not in strike_data:
+            strike_data[xi] = []
+        strike_data[xi].append(yi)
+    
+    # Find bottom 15% of strikes
+    sorted_strikes = sorted(strike_data.keys())
+    num_low_strikes = max(1, int(len(sorted_strikes) * 0.15))
+    low_strikes = set(sorted_strikes[:num_low_strikes])
+    
+    # Process data for fitting
+    filtered_x = []
+    filtered_y = []
+    
+    for strike in sorted_strikes:
+        ivs = strike_data[strike]
+        if strike in low_strikes and len(ivs) > 3:
+            # Remove outliers for bottom 15% of strikes
+            ivs_array = np.array(ivs)
+            q15, q85 = np.percentile(ivs_array, [15, 85])
+            mask = (ivs_array >= q15) & (ivs_array <= q85)
+            filtered_x.extend([strike] * np.sum(mask))
+            filtered_y.extend(ivs_array[mask])
+        else:
+            # Keep all points for other strikes
+            filtered_x.extend([strike] * len(ivs))
+            filtered_y.extend(ivs)
+    
+    if len(filtered_x) < degree + 1:
+        return np.polyfit(x, y, min(len(filtered_x)-1, degree))
+    
+    # Convert to numpy arrays and fit polynomial
+    filtered_x = np.array(filtered_x)
+    filtered_y = np.array(filtered_y)
+    return np.polyfit(filtered_x, filtered_y, degree)
+
 def update(val):
     try:
         current_time = time_slider.val
@@ -178,25 +97,7 @@ def update(val):
         # Clear the plot
         ax.clear()
         
-        # First plot greek data
-        valid_greek_data = {}
-        for strike in greek_data:
-            strike_data = [d for d in greek_data[strike] if d.time <= current_time]
-            if strike_data:
-                valid_greek_data[strike] = strike_data[-1]  # Take the latest data point
-        
-        if valid_greek_data:
-            latest_spot = next(iter(valid_greek_data.values())).spot_price
-            
-            # Plot greek IV curve
-            strikes = sorted(valid_greek_data.keys())
-            rel_strikes = [(k/latest_spot - 1) * 100 for k in strikes]
-            ivs = [valid_greek_data[k].implied_vol * 100 for k in strikes]
-            
-            # Plot greek scatter points
-            ax.scatter(rel_strikes, ivs, s=20, alpha=0.3, color='blue', label='Greeks')
-        
-        # Then plot trade data
+        # Find current index
         current_idx = next(i for i, (ms, t) in enumerate(all_trades) if t.time >= current_time)
         start_idx = max(0, current_idx - 100)
         end_idx = min(len(all_trades), current_idx + 100)
@@ -209,29 +110,67 @@ def update(val):
             relative_strikes = np.array([(t.strike/latest_spot - 1) * 100 for t in window_trades])
             ivs = np.array([t.iv for t in window_trades])
             
+            # Calculate midpoint IVs
+            mid_ivs = []
+            unique_strikes = sorted(set(t.strike for t in window_trades))
+            
+            # Get latest quotes for each strike
+            latest_quotes = {}
+            for t in window_trades[::-1]:  # Reverse to get latest
+                if t.strike not in latest_quotes:
+                    latest_quotes[t.strike] = t
+            
+            # Calculate IVs for midpoint
+            quote_strikes = []
+            for strike in unique_strikes:
+                if strike in latest_quotes:
+                    quote = latest_quotes[strike]
+                    # Create temporary trade for midpoint
+                    mid_price = (quote.bid + quote.ask) / 2
+                    mid_trade = Trade(
+                        time=quote.time,
+                        ms_of_day=quote.ms_of_day,
+                        price=mid_price,
+                        size=quote.size,
+                        right=quote.right,
+                        strike=quote.strike,
+                        spot_price=quote.spot_price
+                    )
+                    
+                    mid_iv = calculate_iv(mid_trade)
+                    
+                    if mid_iv is not None:
+                        quote_strikes.append((strike/latest_spot - 1) * 100)
+                        mid_ivs.append(mid_iv)
+            
             # Separate buyer and seller trades for plotting
             buyer_mask = np.array([t.is_buyer for t in window_trades])
             seller_mask = ~buyer_mask
             
-            # Plot trades
+            # Plot trades with smaller dots
             ax.scatter(relative_strikes[buyer_mask], ivs[buyer_mask] * 100, 
-                      s=2, color='green', alpha=0.5, label='Buyer Initiated')
+                      s=1, color='green', alpha=0.3, label='Buyer Initiated')
             ax.scatter(relative_strikes[seller_mask], ivs[seller_mask] * 100, 
-                      s=2, color='red', alpha=0.5, label='Seller Initiated')
+                      s=1, color='red', alpha=0.3, label='Seller Initiated')
             
-            # Fit polynomial
-            coeffs = fit_polynomial(relative_strikes, ivs)
+            # Plot midpoint IV
+            if quote_strikes:
+                ax.plot(quote_strikes, np.array(mid_ivs) * 100, 'gray', linestyle='--', 
+                       alpha=0.5, linewidth=0.5, label='Quote Midpoint')
+            
+            # Fit weighted polynomial
+            coeffs = fit_polynomial(relative_strikes, ivs, window_trades)
             
             # Create smooth curve for polynomial
             x_smooth = np.linspace(min(relative_strikes), max(relative_strikes), 100)
             y_smooth = np.polyval(coeffs, x_smooth) * 100
             
-            # Plot polynomial curve
-            ax.plot(x_smooth, y_smooth, 'b-', linewidth=2, alpha=0.7,
+            # Plot polynomial curve (thinner)
+            ax.plot(x_smooth, y_smooth, 'b-', linewidth=0.75, alpha=0.5,
                    label='Polynomial Fit')
             
             # Vertical line at ATM
-            ax.axvline(x=0, color='blue', linestyle='--', alpha=0.5, 
+            ax.axvline(x=0, color='blue', linestyle='--', alpha=0.3, 
                       label=f'ATM (Spot: {latest_spot:.0f})')
             
             # Calculate view bounds
@@ -239,7 +178,7 @@ def update(val):
             y_center = np.mean(ivs) * 100  # Center on mean IV
             
             # Base ranges (before zoom)
-            x_range = 15  # Increased range to ±7.5% from spot
+            x_range = 15
             y_range = 20  # ±10 vol points
             
             # Apply zoom and pan
@@ -251,9 +190,9 @@ def update(val):
             # Configure plot
             ax.set_xlabel('% Away from Spot')
             ax.set_ylabel('Implied Volatility (%)')
-            ax.set_title(f'Option Trades and Greeks ({current_time:.2f} hours)')
-            ax.grid(True, alpha=0.3)
-            ax.legend(loc='upper right')
+            ax.set_title(f'Option Trades ({current_time:.2f} hours)')
+            ax.grid(True, alpha=0.2)
+            ax.legend(loc='upper right', fontsize=8)
             
             # Set axis limits
             ax.set_xlim(x_min, x_max)
@@ -273,7 +212,7 @@ def update(val):
         traceback.print_exc()
 
 def plot_trades():
-    global time_slider, zoom_slider, x_pan_slider, y_pan_slider, ax, all_trades, greek_data, fig
+    global time_slider, zoom_slider, x_pan_slider, y_pan_slider, ax, all_trades, fig
     
     # Initialize and load data
     md = market_data.MarketData()
@@ -348,30 +287,6 @@ def plot_trades():
         print("No valid trades to plot")
         return
     
-    # Get greek data
-    print("Fetching greek data...")
-    contracts = get_0dte_contracts(root, target_date)
-    greek_data = {}  # strike -> List[GreekData]
-    
-    # Process calls first
-    for contract in contracts:
-        if contract["right"] == "C":  # Only process calls for now
-            strike = contract["strike"]
-            right = contract["right"]
-            
-            print(f"Fetching greek data for {strike} {right}...")
-            data = fetch_greeks(
-                root=root,
-                expiry=target_date,
-                strike=strike,
-                right=right,
-                start_date=target_date,
-                end_date=target_date
-            )
-            
-            if data:
-                greek_data[strike/1000] = data
-    
     print("Starting to create plot...")
     
     try:
@@ -402,7 +317,7 @@ def plot_trades():
             ax=zoom_slider_ax,
             label='Zoom',
             valmin=0.1,
-            valmax=2.0,
+            valmax=4.0,
             valinit=1.0
         )
         
@@ -437,10 +352,6 @@ def plot_trades():
         print(f"Error in plotting: {str(e)}")
         import traceback
         traceback.print_exc()
-
-def fit_polynomial(x, y, degree=3):
-    """Fit a polynomial of given degree to the data."""
-    return np.polyfit(x, y, degree)
 
 if __name__ == "__main__":
     plot_trades() 

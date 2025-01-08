@@ -8,35 +8,50 @@ import seaborn as sns
 from matplotlib.widgets import Slider
 from scipy.stats import norm
 
-def normalize_data(x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray, float, float, float, float]:
-    """Normalize data to improve polynomial fitting"""
-    x_mean, x_std = np.mean(x), np.std(x)
-    y_mean, y_std = np.mean(y), np.std(y)
+def fit_polynomial(x, y, trades, degree=4):
+    """
+    Fit a polynomial with outlier removal for the bottom 15% of strikes.
+    """
+    if len(x) < degree + 1:
+        return np.polyfit(x, y, min(len(x)-1, 2))
     
-    x_norm = (x - x_mean) / x_std if x_std > 0 else x - x_mean
-    y_norm = (y - y_mean) / y_std if y_std > 0 else y - y_mean
+    # Group data by strike
+    strike_data = {}
+    for i, (xi, yi) in enumerate(zip(x, y)):
+        if xi not in strike_data:
+            strike_data[xi] = []
+        strike_data[xi].append(yi)
     
-    return x_norm, y_norm, x_mean, x_std, y_mean, y_std
-
-def robust_polyfit(x: np.ndarray, y: np.ndarray, degree: int = 2) -> Tuple[np.ndarray, callable]:
-    """Perform robust polynomial fitting with normalization"""
-    try:
-        # Normalize data
-        x_norm, y_norm, x_mean, x_std, y_mean, y_std = normalize_data(x, y)
-        
-        # Fit polynomial to normalized data
-        coeffs = np.polyfit(x_norm, y_norm, degree)
-        
-        # Create function to evaluate polynomial with denormalization
-        def poly_func(x_new):
-            x_new_norm = (x_new - x_mean) / x_std if x_std > 0 else x_new - x_mean
-            y_new_norm = np.polyval(coeffs, x_new_norm)
-            return y_new_norm * y_std + y_mean if y_std > 0 else y_new_norm + y_mean
-        
-        return coeffs, poly_func
-    except Exception as e:
-        print(f"Error in polynomial fitting: {e}")
-        return None, lambda x: np.mean(y)
+    # Find bottom 15% of strikes
+    sorted_strikes = sorted(strike_data.keys())
+    num_low_strikes = max(1, int(len(sorted_strikes) * 0.15))
+    low_strikes = set(sorted_strikes[:num_low_strikes])
+    
+    # Process data for fitting
+    filtered_x = []
+    filtered_y = []
+    
+    for strike in sorted_strikes:
+        ivs = strike_data[strike]
+        if strike in low_strikes and len(ivs) > 3:
+            # Remove outliers for bottom 15% of strikes
+            ivs_array = np.array(ivs)
+            q15, q85 = np.percentile(ivs_array, [15, 85])
+            mask = (ivs_array >= q15) & (ivs_array <= q85)
+            filtered_x.extend([strike] * np.sum(mask))
+            filtered_y.extend(ivs_array[mask])
+        else:
+            # Keep all points for other strikes
+            filtered_x.extend([strike] * len(ivs))
+            filtered_y.extend(ivs)
+    
+    if len(filtered_x) < degree + 1:
+        return np.polyfit(x, y, min(len(filtered_x)-1, degree))
+    
+    # Convert to numpy arrays and fit polynomial
+    filtered_x = np.array(filtered_x)
+    filtered_y = np.array(filtered_y)
+    return np.polyfit(filtered_x, filtered_y, degree)
 
 def classify_trades_by_polynomial(trades: List[Trade], current_time: float, window_size: int = 100) -> Dict[float, int]:
     """
@@ -55,39 +70,51 @@ def classify_trades_by_polynomial(trades: List[Trade], current_time: float, wind
     # Initialize net flow dictionary
     net_flow = {}
     
-    # Process trades in sliding windows
-    for i in range(len(trades)):
-        # Get window of trades centered on current trade
-        start_idx = max(0, i - window_size//2)
-        end_idx = min(len(trades), i + window_size//2)
-        window_trades = trades[start_idx:end_idx]
+    # Group trades by timestamp
+    time_groups = {}
+    for trade in trades:
+        # Round to nearest millisecond to group trades at same timestamp
+        rounded_time = round(trade.time * 1000) / 1000
+        if rounded_time not in time_groups:
+            time_groups[rounded_time] = []
+        time_groups[rounded_time].append(trade)
+    
+    # Process each timestamp
+    timestamps = sorted(time_groups.keys())
+    for i, current_time in enumerate(timestamps):
+        current_trades = time_groups[current_time]
+        
+        # Get window of trades centered on current timestamp
+        window_start = max(0, i - window_size//2)
+        window_end = min(len(timestamps), i + window_size//2)
+        window_trades = []
+        for t in timestamps[window_start:window_end]:
+            window_trades.extend(time_groups[t])
         
         if len(window_trades) < 3:  # Need at least 3 points for polynomial fit
             continue
         
-        # Get current trade
-        current_trade = trades[i]
-        latest_spot = current_trade.spot_price
+        # Get latest spot price
+        latest_spot = window_trades[-1].spot_price
         
         # Calculate relative strikes and IVs for window
         relative_strikes = np.array([(t.strike/latest_spot - 1) * 100 for t in window_trades])
         ivs = np.array([t.iv * 100 for t in window_trades])
         
-        # Fit polynomial
-        _, poly_func = robust_polyfit(relative_strikes, ivs)
+        # Fit polynomial once for this timestamp
+        coeffs = fit_polynomial(relative_strikes, ivs, window_trades)
         
-        # Get polynomial value at current trade's strike
-        current_relative_strike = (current_trade.strike/latest_spot - 1) * 100
-        poly_iv = poly_func(current_relative_strike)
-        
-        # Classify trade
-        actual_iv = current_trade.iv * 100
-        is_sell = actual_iv > poly_iv
-        
-        # Update net flow
-        if current_trade.strike not in net_flow:
-            net_flow[current_trade.strike] = 0
-        net_flow[current_trade.strike] += (-1 if is_sell else 1) * current_trade.size
+        # Classify all trades at this timestamp using the same polynomial
+        for trade in current_trades:
+            current_relative_strike = (trade.strike/latest_spot - 1) * 100
+            poly_iv = np.polyval(coeffs, current_relative_strike)
+            actual_iv = trade.iv * 100
+            is_sell = actual_iv > poly_iv
+            
+            # Update net flow
+            if trade.strike not in net_flow:
+                net_flow[trade.strike] = 0
+            net_flow[trade.strike] += (-1 if is_sell else 1) * trade.size
     
     return net_flow
 
