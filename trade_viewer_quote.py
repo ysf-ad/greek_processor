@@ -111,6 +111,10 @@ def fit_taylor_series(x, y, trades, max_degree=12):
     print(f"Final Taylor series degree: {len(best_coeffs)-1}")
     return best_coeffs
 
+def fit_polynomial(x, y, degree=4):
+    """Simple polynomial fit to the midpoints"""
+    return np.polyfit(x, y, degree)
+
 def update(val):
     try:
         current_time = time_slider.val
@@ -169,17 +173,16 @@ def update(val):
             ax.scatter(mid_strikes, mid_ivs * 100, color='blue', 
                       s=20, alpha=0.7, label='Strike Midpoint')
             
-            # Fit Taylor series to midpoints
-            coeffs = fit_taylor_series(mid_strikes, mid_ivs, window_trades)
-            print(f"Fitted Taylor series coefficients: {coeffs}")
+            # Fit polynomial to midpoints
+            coeffs = fit_polynomial(mid_strikes, mid_ivs)
             
-            # Create smooth curve for Taylor series
+            # Create smooth curve for polynomial
             x_smooth = np.linspace(min(relative_strikes), max(relative_strikes), 100)
-            y_smooth = evaluate_series(x_smooth, coeffs)  # Use the same evaluate_series function
+            y_smooth = np.polyval(coeffs, x_smooth)
             
-            # Plot Taylor series curve
+            # Plot polynomial curve
             ax.plot(x_smooth, y_smooth * 100, 'b-', linewidth=1.5, alpha=0.8,
-                   label=f'Taylor Series (degree {len(coeffs)-1})')
+                   label='Polynomial Fit')
             
             # Vertical line at ATM
             ax.axvline(x=0, color='blue', linestyle='--', alpha=0.3, 
