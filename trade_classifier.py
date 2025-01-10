@@ -8,49 +8,9 @@ import seaborn as sns
 from matplotlib.widgets import Slider
 from scipy.stats import norm
 
-def fit_polynomial(x, y, trades, degree=4):
-    """
-    Fit a polynomial weighted by the number of trades at each strike.
-    """
-    if len(x) < degree + 1:
-        return np.polyfit(x, y, min(len(x)-1, 2))
-    
-    # Group trades by strike
-    strike_data = {}
-    for i, (xi, yi) in enumerate(zip(x, y)):
-        trade = trades[i]
-        strike = trade.strike
-        if strike not in strike_data:
-            strike_data[strike] = []
-        strike_data[strike].append(yi)
-    
-    # Convert to relative strikes and prepare for fitting
-    latest_spot = trades[-1].spot_price
-    final_x = []
-    final_y = []
-    weights = []
-    
-    for strike in sorted(strike_data.keys()):
-        ivs = strike_data[strike]
-        relative_strike = (strike/latest_spot - 1) * 100
-        # Use mean IV for each strike
-        final_x.append(relative_strike)
-        final_y.append(np.mean(ivs))
-        # Weight by number of trades
-        weights.append(len(ivs))
-    
-    # Convert to numpy arrays
-    final_x = np.array(final_x)
-    final_y = np.array(final_y)
-    weights = np.array(weights)
-    
-    # Fit weighted polynomial
-    coeffs = np.polyfit(final_x, final_y, degree, w=weights)
-    return coeffs
-
 def classify_trades_by_polynomial(trades: List[Trade], current_time: float, window_size: int = 100) -> Dict[float, int]:
     """
-    Classify trades as buys/sells based on their position relative to the polynomial fit
+    Classify trades as buys/sells based on their position relative to their strike's median IV.
     Returns a dictionary of strike -> net flow (positive for buys, negative for sells)
     """
     # Filter trades up to current time
@@ -65,7 +25,7 @@ def classify_trades_by_polynomial(trades: List[Trade], current_time: float, wind
     # Initialize net flow dictionary
     net_flow = {}
     
-    # Group trades by timestamp
+    # Group trades by timestamp for windowing
     time_groups = {}
     for trade in trades:
         # Round to nearest millisecond to group trades at same timestamp
@@ -86,30 +46,29 @@ def classify_trades_by_polynomial(trades: List[Trade], current_time: float, wind
         for t in timestamps[window_start:window_end]:
             window_trades.extend(time_groups[t])
         
-        if len(window_trades) < 3:  # Need at least 3 points for polynomial fit
+        if len(window_trades) < 3:  # Need at least 3 points
             continue
         
-        # Get latest spot price
-        latest_spot = window_trades[-1].spot_price
+        # Group trades by strike and calculate medians
+        strike_data = {}
+        for t in window_trades:
+            if t.strike not in strike_data:
+                strike_data[t.strike] = []
+            strike_data[t.strike].append(t.iv)
         
-        # Calculate relative strikes and IVs for window
-        relative_strikes = np.array([(t.strike/latest_spot - 1) * 100 for t in window_trades])
-        ivs = np.array([t.iv * 100 for t in window_trades])
+        # Calculate median IV for each strike
+        strike_medians = {strike: np.median(ivs) for strike, ivs in strike_data.items()}
         
-        # Fit polynomial once for this timestamp
-        coeffs = fit_polynomial(relative_strikes, ivs, window_trades)
-        
-        # Classify all trades at this timestamp using the same polynomial
+        # Classify current trades against their strike's median
         for trade in current_trades:
-            current_relative_strike = (trade.strike/latest_spot - 1) * 100
-            poly_iv = np.polyval(coeffs, current_relative_strike)
-            actual_iv = trade.iv * 100
-            is_sell = actual_iv > poly_iv
-            
-            # Update net flow
-            if trade.strike not in net_flow:
-                net_flow[trade.strike] = 0
-            net_flow[trade.strike] += (-1 if is_sell else 1) * trade.size
+            if trade.strike in strike_medians:
+                median_iv = strike_medians[trade.strike]
+                is_sell = trade.iv > median_iv
+                
+                # Update net flow
+                if trade.strike not in net_flow:
+                    net_flow[trade.strike] = 0
+                net_flow[trade.strike] += (-1 if is_sell else 1) * trade.size
     
     return net_flow
 
@@ -193,7 +152,7 @@ class NetFlowPlotter:
 def main():
     # Initialize and load data
     md = market_data.MarketData()
-    target_date = "20250103"
+    target_date = "20250108"
     root = "SPXW"
     
     print("Loading spot price data...")
