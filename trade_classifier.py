@@ -10,48 +10,43 @@ from scipy.stats import norm
 
 def fit_polynomial(x, y, trades, degree=4):
     """
-    Fit a polynomial with outlier removal for the bottom 15% of strikes.
+    Fit a polynomial weighted by the number of trades at each strike.
     """
     if len(x) < degree + 1:
         return np.polyfit(x, y, min(len(x)-1, 2))
     
-    # Group data by strike
+    # Group trades by strike
     strike_data = {}
     for i, (xi, yi) in enumerate(zip(x, y)):
-        if xi not in strike_data:
-            strike_data[xi] = []
-        strike_data[xi].append(yi)
+        trade = trades[i]
+        strike = trade.strike
+        if strike not in strike_data:
+            strike_data[strike] = []
+        strike_data[strike].append(yi)
     
-    # Find bottom 15% of strikes
-    sorted_strikes = sorted(strike_data.keys())
-    num_low_strikes = max(1, int(len(sorted_strikes) * 0.15))
-    low_strikes = set(sorted_strikes[:num_low_strikes])
+    # Convert to relative strikes and prepare for fitting
+    latest_spot = trades[-1].spot_price
+    final_x = []
+    final_y = []
+    weights = []
     
-    # Process data for fitting
-    filtered_x = []
-    filtered_y = []
-    
-    for strike in sorted_strikes:
+    for strike in sorted(strike_data.keys()):
         ivs = strike_data[strike]
-        if strike in low_strikes and len(ivs) > 3:
-            # Remove outliers for bottom 15% of strikes
-            ivs_array = np.array(ivs)
-            q15, q85 = np.percentile(ivs_array, [15, 85])
-            mask = (ivs_array >= q15) & (ivs_array <= q85)
-            filtered_x.extend([strike] * np.sum(mask))
-            filtered_y.extend(ivs_array[mask])
-        else:
-            # Keep all points for other strikes
-            filtered_x.extend([strike] * len(ivs))
-            filtered_y.extend(ivs)
+        relative_strike = (strike/latest_spot - 1) * 100
+        # Use mean IV for each strike
+        final_x.append(relative_strike)
+        final_y.append(np.mean(ivs))
+        # Weight by number of trades
+        weights.append(len(ivs))
     
-    if len(filtered_x) < degree + 1:
-        return np.polyfit(x, y, min(len(filtered_x)-1, degree))
+    # Convert to numpy arrays
+    final_x = np.array(final_x)
+    final_y = np.array(final_y)
+    weights = np.array(weights)
     
-    # Convert to numpy arrays and fit polynomial
-    filtered_x = np.array(filtered_x)
-    filtered_y = np.array(filtered_y)
-    return np.polyfit(filtered_x, filtered_y, degree)
+    # Fit weighted polynomial
+    coeffs = np.polyfit(final_x, final_y, degree, w=weights)
+    return coeffs
 
 def classify_trades_by_polynomial(trades: List[Trade], current_time: float, window_size: int = 100) -> Dict[float, int]:
     """

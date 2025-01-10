@@ -42,50 +42,74 @@ def calculate_iv(trade: Trade) -> float:
     except:
         return None
 
-def fit_polynomial(x, y, trades, degree=4):
+def evaluate_series(x, coeffs):
+    """Evaluate Taylor series at x given coefficients"""
+    result = coeffs[0]  # constant term
+    x_term = x.copy()
+    for c in coeffs[1:]:
+        result += c * x_term
+        x_term = x_term * x / (len(coeffs))  # normalize to prevent overflow
+    return result
+
+def fit_taylor_series(x, y, trades, max_degree=12):
     """
-    Fit a polynomial with outlier removal for the bottom 15% of strikes.
+    Fit a Taylor series to the midpoint of trades at each strike.
+    Allow high degree fitting to get exact match to midpoints.
     """
-    if len(x) < degree + 1:
-        return np.polyfit(x, y, min(len(x)-1, 2))
-    
-    # Group data by strike
+    # Group trades by strike
     strike_data = {}
     for i, (xi, yi) in enumerate(zip(x, y)):
-        if xi not in strike_data:
-            strike_data[xi] = []
-        strike_data[xi].append(yi)
+        trade = trades[i]
+        strike = trade.strike
+        if strike not in strike_data:
+            strike_data[strike] = []
+        strike_data[strike].append(yi)
     
-    # Find bottom 15% of strikes
-    sorted_strikes = sorted(strike_data.keys())
-    num_low_strikes = max(1, int(len(sorted_strikes) * 0.15))
-    low_strikes = set(sorted_strikes[:num_low_strikes])
+    # Convert to relative strikes and get midpoints
+    latest_spot = trades[-1].spot_price
+    final_x = []
+    final_y = []
     
-    # Process data for fitting
-    filtered_x = []
-    filtered_y = []
-    
-    for strike in sorted_strikes:
+    for strike in sorted(strike_data.keys()):
         ivs = strike_data[strike]
-        if strike in low_strikes and len(ivs) > 3:
-            # Remove outliers for bottom 15% of strikes
-            ivs_array = np.array(ivs)
-            q15, q85 = np.percentile(ivs_array, [15, 85])
-            mask = (ivs_array >= q15) & (ivs_array <= q85)
-            filtered_x.extend([strike] * np.sum(mask))
-            filtered_y.extend(ivs_array[mask])
-        else:
-            # Keep all points for other strikes
-            filtered_x.extend([strike] * len(ivs))
-            filtered_y.extend(ivs)
+        relative_strike = (strike/latest_spot - 1) * 100
+        # Use median IV for each strike (more robust than mean)
+        final_x.append(relative_strike)
+        final_y.append(np.median(ivs))
     
-    if len(filtered_x) < degree + 1:
-        return np.polyfit(x, y, min(len(filtered_x)-1, degree))
+    # Convert to numpy arrays
+    final_x = np.array(final_x)
+    final_y = np.array(final_y)
     
-    # Convert to numpy arrays and fit polynomial
-    filtered_x = np.array(filtered_x)
-    filtered_y = np.array(filtered_y)
-    return np.polyfit(filtered_x, filtered_y, degree)
+    # Try increasing degrees until we get a good fit
+    best_coeffs = None
+    best_loss = float('inf')
+    
+    for degree in range(2, max_degree + 1):
+        if len(final_x) <= degree:
+            break
+            
+        # Fit polynomial of current degree
+        coeffs = np.polyfit(final_x, final_y, degree)
+        
+        # Calculate loss
+        y_pred = np.polyval(coeffs, final_x)
+        loss = np.mean((final_y - y_pred) ** 2)
+        
+        print(f"Degree {degree} loss: {loss:.8f}")
+        
+        # Keep if it's better
+        if loss < best_loss:
+            best_coeffs = coeffs
+            best_loss = loss
+            
+            # If fit is very good, we can stop
+            if loss < 1e-10:
+                print(f"Found excellent fit at degree {degree}")
+                break
+    
+    print(f"Final Taylor series degree: {len(best_coeffs)-1}")
+    return best_coeffs
 
 def update(val):
     try:
@@ -105,43 +129,31 @@ def update(val):
         
         if window_trades:
             latest_spot = window_trades[-1].spot_price
+            print(f"Processing {len(window_trades)} trades")
             
             # Calculate all relative strikes and IVs first
             relative_strikes = np.array([(t.strike/latest_spot - 1) * 100 for t in window_trades])
             ivs = np.array([t.iv for t in window_trades])
+            print(f"Got {len(ivs)} trade IVs")
             
-            # Calculate midpoint IVs
+            # Group trades by strike and calculate midpoints
+            strike_data = {}
+            for t, rel_strike, iv in zip(window_trades, relative_strikes, ivs):
+                if rel_strike not in strike_data:
+                    strike_data[rel_strike] = []
+                strike_data[rel_strike].append(iv)
+            
+            # Calculate midpoints for each strike
+            mid_strikes = []
             mid_ivs = []
-            unique_strikes = sorted(set(t.strike for t in window_trades))
+            for strike in sorted(strike_data.keys()):
+                strike_ivs = strike_data[strike]
+                mid_strikes.append(strike)
+                mid_ivs.append(np.median(strike_ivs))
             
-            # Get latest quotes for each strike
-            latest_quotes = {}
-            for t in window_trades[::-1]:  # Reverse to get latest
-                if t.strike not in latest_quotes:
-                    latest_quotes[t.strike] = t
-            
-            # Calculate IVs for midpoint
-            quote_strikes = []
-            for strike in unique_strikes:
-                if strike in latest_quotes:
-                    quote = latest_quotes[strike]
-                    # Create temporary trade for midpoint
-                    mid_price = (quote.bid + quote.ask) / 2
-                    mid_trade = Trade(
-                        time=quote.time,
-                        ms_of_day=quote.ms_of_day,
-                        price=mid_price,
-                        size=quote.size,
-                        right=quote.right,
-                        strike=quote.strike,
-                        spot_price=quote.spot_price
-                    )
-                    
-                    mid_iv = calculate_iv(mid_trade)
-                    
-                    if mid_iv is not None:
-                        quote_strikes.append((strike/latest_spot - 1) * 100)
-                        mid_ivs.append(mid_iv)
+            mid_strikes = np.array(mid_strikes)
+            mid_ivs = np.array(mid_ivs)
+            print(f"Calculated {len(mid_ivs)} strike midpoints")
             
             # Separate buyer and seller trades for plotting
             buyer_mask = np.array([t.is_buyer for t in window_trades])
@@ -153,52 +165,47 @@ def update(val):
             ax.scatter(relative_strikes[seller_mask], ivs[seller_mask] * 100, 
                       s=1, color='red', alpha=0.3, label='Seller Initiated')
             
-            # Plot midpoint IV
-            if quote_strikes:
-                ax.plot(quote_strikes, np.array(mid_ivs) * 100, 'gray', linestyle='--', 
-                       alpha=0.5, linewidth=0.5, label='Quote Midpoint')
+            # Plot strike midpoints with larger dots
+            ax.scatter(mid_strikes, mid_ivs * 100, color='blue', 
+                      s=20, alpha=0.7, label='Strike Midpoint')
             
-            # Fit weighted polynomial
-            coeffs = fit_polynomial(relative_strikes, ivs, window_trades)
+            # Fit Taylor series to midpoints
+            coeffs = fit_taylor_series(mid_strikes, mid_ivs, window_trades)
+            print(f"Fitted Taylor series coefficients: {coeffs}")
             
-            # Create smooth curve for polynomial
+            # Create smooth curve for Taylor series
             x_smooth = np.linspace(min(relative_strikes), max(relative_strikes), 100)
-            y_smooth = np.polyval(coeffs, x_smooth) * 100
+            y_smooth = evaluate_series(x_smooth, coeffs)  # Use the same evaluate_series function
             
-            # Plot polynomial curve (thinner)
-            ax.plot(x_smooth, y_smooth, 'b-', linewidth=0.75, alpha=0.5,
-                   label='Polynomial Fit')
+            # Plot Taylor series curve
+            ax.plot(x_smooth, y_smooth * 100, 'b-', linewidth=1.5, alpha=0.8,
+                   label=f'Taylor Series (degree {len(coeffs)-1})')
             
             # Vertical line at ATM
             ax.axvline(x=0, color='blue', linestyle='--', alpha=0.3, 
                       label=f'ATM (Spot: {latest_spot:.0f})')
             
             # Calculate view bounds
-            x_center = 0  # Center on ATM
-            y_center = np.mean(ivs) * 100  # Center on mean IV
+            x_center = 0
+            y_center = np.mean(ivs) * 100
             
-            # Base ranges (before zoom)
             x_range = 15
-            y_range = 20  # ±10 vol points
+            y_range = 20
             
-            # Apply zoom and pan
             x_min = x_center - (x_range / zoom) + x_pan
             x_max = x_center + (x_range / zoom) + x_pan
             y_min = y_center - (y_range / zoom) + y_pan
             y_max = y_center + (y_range / zoom) + y_pan
             
-            # Configure plot
             ax.set_xlabel('% Away from Spot')
             ax.set_ylabel('Implied Volatility (%)')
             ax.set_title(f'Option Trades ({current_time:.2f} hours)')
             ax.grid(True, alpha=0.2)
             ax.legend(loc='upper right', fontsize=8)
             
-            # Set axis limits
             ax.set_xlim(x_min, x_max)
             ax.set_ylim(max(0, y_min), y_max)
             
-            # Make sure axes are visible
             ax.spines['left'].set_visible(True)
             ax.spines['bottom'].set_visible(True)
             ax.spines['right'].set_visible(True)
