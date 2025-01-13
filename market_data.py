@@ -4,12 +4,14 @@ from typing import Dict, Optional
 import json
 
 class MarketData:
-    def __init__(self):
+    def __init__(self, root: str, date: str):
+        self.root = root
+        self.date = date
         self.spot_price_data: Dict[int, float] = {}  # ms_of_day -> price mapping
 
-    def get_first_strike(self, root: str, date: str) -> Optional[int]:
-        """Get the first available strike for a given root and date"""
-        url = f"http://127.0.0.1:25510/v2/list/strikes?root={root}&exp={date}"
+    def get_first_strike(self) -> Optional[int]:
+        """Get the first available strike for the given root and date."""
+        url = f"http://127.0.0.1:25510/v2/list/strikes?root={self.root}&exp={self.date}"
         response = requests.get(url)
         
         if response.status_code != 200:
@@ -23,16 +25,16 @@ class MarketData:
             
         return data["response"][0]
 
-    def load_spot_prices(self, root: str, date: str) -> None:
-        """Load spot prices for a given root and date"""
+    def load_spot_prices(self) -> None:
+        """Load spot prices for the given root and date."""
         # First get a valid strike
-        strike = self.get_first_strike(root, date)
+        strike = self.get_first_strike()
         if not strike:
             print("Could not get valid strike")
             return
         
         # Construct URL for greeks endpoint
-        url = f"http://127.0.0.1:25510/v2/hist/option/greeks?root={root}&exp={date}&strike={strike}&right=C&start_date={date}&end_date={date}&ivl=500"
+        url = f"http://127.0.0.1:25510/v2/hist/option/greeks?root={self.root}&exp={self.date}&strike={strike}&right=C&start_date={self.date}&end_date={self.date}&ivl=500"
         response = requests.get(url)
         
         if response.status_code != 200:
@@ -55,7 +57,7 @@ class MarketData:
         print(f"Loaded {len(self.spot_price_data)} spot price points")
 
     def get_spot_price(self, ms_of_day: int) -> Optional[float]:
-        """Get spot price closest to given ms_of_day"""
+        """Get spot price closest to given ms_of_day."""
         if not self.spot_price_data:
             print("No spot price data loaded")
             return None
@@ -66,10 +68,10 @@ class MarketData:
         
         return self.spot_price_data[closest_ms]
 
-    @staticmethod
-    def get_day_trade_quotes(root, day):
+    def get_day_trade_quotes(self) -> Optional[Dict]:
+        """Retrieve trade and quote data for the day."""
         # Initial request
-        url = f"http://127.0.0.1:25510/v2/bulk_hist/option/trade_quote?root={root}&exp={day}&start_date={day}&end_date={day}&exclusive=true"
+        url = f"http://127.0.0.1:25510/v2/bulk_hist/option/trade_quote?root={self.root}&exp={self.date}&start_date={self.date}&end_date={self.date}&exclusive=true"
         
         try:
             response = requests.get(url)
@@ -125,11 +127,10 @@ class MarketData:
             print(f"Error fetching trade quotes: {str(e)}")
             return None
 
-    @staticmethod
-    def get_day_trades(root: str, day: str):
-        print(f"getting trades for {root} on {day}")
-        """Get all trades for a given root on a specific day"""
-        url = f"http://127.0.0.1:25510/v2/bulk_hist/option/trade?root={root}&exp=0&start_date={day}&end_date={day}"
+    def get_day_trades(self) -> Optional[Dict]:
+        """Get all trades for a given root on a specific day."""
+        print(f"getting trades for {self.root} on {self.date}")
+        url = f"http://127.0.0.1:25510/v2/bulk_hist/option/trade?root={self.root}&exp=0&start_date={self.date}&end_date={self.date}"
         response = requests.get(url)
         
         if response.status_code != 200:
