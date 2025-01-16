@@ -2,6 +2,7 @@ import requests
 import datetime
 from typing import Dict, Optional
 import json
+import bisect
 
 class MarketData:
     def __init__(self, root: str, date: str):
@@ -57,36 +58,29 @@ class MarketData:
         print(f"Loaded {len(self.spot_price_data)} spot price points")
 
     def get_spot_price(self, ms_of_day: int) -> Optional[float]:
-        """Get spot price closest to given ms_of_day."""
-        if not self.spot_price_data:
-            print("No spot price data loaded")
+        if ms_of_day not in self.spot_price_data:
             return None
-            
-        # Find closest time
-        closest_ms = min(self.spot_price_data.keys(), 
-                        key=lambda x: abs(x - ms_of_day))
-        
-        return self.spot_price_data[closest_ms]
+        """Get spot price for the rounded ms_of_day."""
+        rounded_ms = round(ms_of_day / 500) * 500
+        return self.spot_price_data.get(rounded_ms)
 
     def get_day_trade_quotes(self) -> Optional[Dict]:
         """Retrieve trade and quote data for the day."""
-        # Initial request
         url = f"http://127.0.0.1:25510/v2/bulk_hist/option/trade_quote?root={self.root}&exp={self.date}&start_date={self.date}&end_date={self.date}&exclusive=true"
         
         try:
+            print(f"Requesting initial data from: {url}")
             response = requests.get(url)
             if response.status_code != 200:
                 print(f"Error: {response.status_code}")
                 return None
             
-            # Try to parse JSON with error handling
             try:
                 data = response.json()
+                print(f"Initial data received with {len(data['response'])} responses")
             except requests.exceptions.JSONDecodeError as e:
                 print(f"JSON decode error at position {e.pos}. Attempting to truncate and parse...")
-                # Try to parse the valid portion of the response
                 valid_json = response.text[:e.pos]
-                # Find the last complete record
                 last_bracket = valid_json.rfind(']')
                 if last_bracket != -1:
                     valid_json = valid_json[:last_bracket+1] + ']}'
@@ -98,12 +92,13 @@ class MarketData:
             all_responses = data["response"]
             print(f"got first page with {len(all_responses)} responses")
             
-            # Handle pagination
             while True:
                 next_page = data["header"].get("next_page")
-                if next_page == "null" or next_page is None:
+                if not next_page or next_page == "null":
+                    print("No more pages to fetch.")
                     break
-                    
+                
+                print(f"Fetching next page: {next_page}")
                 try:
                     response = requests.get(next_page)
                     if response.status_code != 200:
@@ -121,6 +116,7 @@ class MarketData:
                     print(f"Unexpected error during pagination: {str(e)}")
                     break
             
+            print(f"Total responses collected: {len(all_responses)}")
             return {"header": data["header"], "response": all_responses}
             
         except Exception as e:
