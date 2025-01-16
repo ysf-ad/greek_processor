@@ -1,4 +1,4 @@
-WIP*
+WIP, not useful yet*
 
 
 Python project that analyzes OPRA options data and models the IVS based on each trade
