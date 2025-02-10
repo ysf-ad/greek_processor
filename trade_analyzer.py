@@ -110,35 +110,40 @@ class TradeAnalyzer:
         print(f"Processed {len(self.trades)} valid 0DTE trades")
 
     def plot_iv_surface(self):
-        """Plot IV surface with improved visualization using trade-count based window."""
+        """Plot IV surface and trade flow histogram."""
         if not self.trades:
             print("No trades to plot")
             return
-            
-        fig = plt.figure(figsize=(12, 8))
-        ax = fig.add_subplot(111)
-        plt.subplots_adjust(bottom=0.25)
+        
+        # Create figure with two subplots
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12), height_ratios=[2, 1])
+        plt.subplots_adjust(bottom=0.2, hspace=0.3)
 
         times = np.array([t.time for t in self.trades])
         rel_strikes = np.array([t.rel_strike for t in self.trades])
         ivs = np.array([t.iv for t in self.trades])
+        sizes = np.array([t.size for t in self.trades])
 
-        # Create time-based scatter plot
-        scatter = ax.scatter(rel_strikes, ivs, c='blue', alpha=0.5, s=2)
-        line, = ax.plot([], [], 'r-', lw=2, label='Fitted Curve')
+        # Top subplot - IV Surface
+        scatter = ax1.scatter(rel_strikes, ivs, c='blue', alpha=0.5, s=2)
+        line, = ax1.plot([], [], 'r-', lw=2, label='Fitted Curve')
+        ax1.set_xlabel('Relative Strike (%)')
+        ax1.set_ylabel('Implied Volatility')
+        ax1.grid(True)
+        ax1.legend()
 
-        ax.set_xlabel('Relative Strike (%)')
-        ax.set_ylabel('Implied Volatility')
-        ax.set_title('0DTE IV Surface')
-        ax.grid(True)
-        ax.legend()
+        # Bottom subplot - Flow Histogram
+        bars = ax2.bar([], [], width=0.2, alpha=0.6)
+        ax2.set_xlabel('Relative Strike (%)')
+        ax2.set_ylabel('Net Flow (Contracts)')
+        ax2.grid(True)
 
-        # Time slider (market hours: 9:30 AM to 4:00 PM)
+        # Time slider
         ax_time = plt.axes([0.1, 0.1, 0.65, 0.03])
         time_slider = Slider(ax_time, 'Time (hours)', 9.5, 16.0,
                            valinit=9.5, valstep=0.1)
 
-        # Window size in number of trades
+        # Window size slider
         ax_window = plt.axes([0.1, 0.05, 0.65, 0.03])
         window_slider = Slider(ax_window, 'Window (trades)', 50, 500,
                              valinit=500, valstep=50)
@@ -160,8 +165,10 @@ class TradeAnalyzer:
 
             current_strikes = rel_strikes[start_idx:end_idx]
             current_ivs = ivs[start_idx:end_idx]
+            current_sizes = sizes[start_idx:end_idx]
 
-            if len(current_strikes) > 5:  # Minimum points for fitting
+            if len(current_strikes) > 5:
+                # Update IV scatter and fit
                 scatter.set_offsets(np.c_[current_strikes, current_ivs])
 
                 try:
@@ -172,16 +179,50 @@ class TradeAnalyzer:
                 except Exception as e:
                     print(f"Fitting error: {e}")
                     line.set_data([], [])
+
+                # Update histogram
+                # Calculate net flow by strike
+                unique_strikes = np.unique(current_strikes)
+                net_flows = []
+                for strike in unique_strikes:
+                    mask = current_strikes == strike
+                    # Calculate net flow (negative for sells, positive for buys)
+                    flows = current_sizes[mask]
+                    net_flow = np.sum(flows)  # Sum will preserve sign
+                    net_flows.append(net_flow)
+
+                # Clear previous bars
+                ax2.clear()
+                ax2.grid(True)
+                ax2.set_xlabel('Relative Strike (%)')
+                ax2.set_ylabel('Net Flow (Contracts)')
+                
+                # Plot new bars with skinnier width and proper coloring
+                colors = ['red' if flow < 0 else 'green' for flow in net_flows]
+                ax2.bar(unique_strikes, net_flows, width=0.1, color=colors, alpha=0.7)
+                
+                # Add horizontal line at y=0 for reference
+                ax2.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
+                
+                # Set axis limits
+                ax1.set_xlim(current_strikes.min() - 1, current_strikes.max() + 1)
+                ax1.set_ylim(max(0, current_ivs.min() - 0.1), min(2, current_ivs.max() + 0.1))
+                ax2.set_xlim(current_strikes.min() - 1, current_strikes.max() + 1)
+                
+                # Set y-axis limits symmetrically around zero for better visualization
+                max_abs_flow = max(abs(min(net_flows)), abs(max(net_flows)))
+                ax2.set_ylim(-max_abs_flow * 1.1, max_abs_flow * 1.1)
+
             else:
                 scatter.set_offsets(np.c_[[], []])
                 line.set_data([], [])
+                ax2.clear()
+                ax2.grid(True)
+                ax2.set_xlabel('Relative Strike (%)')
+                ax2.set_ylabel('Net Flow (Contracts)')
 
-            if len(current_strikes) > 0:
-                ax.set_xlim(current_strikes.min() - 1, current_strikes.max() + 1)
-                ax.set_ylim(max(0, current_ivs.min() - 0.1), min(2, current_ivs.max() + 0.1))
-            
             # Update title with current time and number of trades
-            ax.set_title(f'0DTE IV Surface - Time: {current_time:.1f} (Trades: {len(current_strikes)})')
+            ax1.set_title(f'0DTE IV Surface - Time: {current_time:.1f} (Trades: {len(current_strikes)})')
             fig.canvas.draw_idle()
 
         time_slider.on_changed(update)
